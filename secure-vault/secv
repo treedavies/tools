@@ -1,0 +1,779 @@
+#!/bin/bash
+# Secure-Vault (secv)
+#----------------------------------------------------------------------------------
+#    Copyright (C) 2018 Tree Davies tdavies@darkphysics.net
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+# ---------------------------------------------------------------------------------
+VERSION=0.006
+umask 077
+
+# GLOBALS
+declare -g RTN_VAR=''
+declare -rg DELIMINTER='::::::'
+declare -rg SHAREDMEM='/dev/shm'
+declare -rg SHM="$SHAREDMEM/$USER/.secv"
+declare -rg SECVMAP="/home/$USER/.secv-map"
+
+# Atttempt to keep state consistent
+ctrl_c_cleanup() {
+	echo "cleaning up"
+	rm -rf $SHM
+	exit 0
+}
+
+trap ctrl_c_cleanup SIGINT
+
+dep_check() {
+	local -r DEPS=(sed xclip awk gpg2)
+	for DEP in ${DEPS[@]} ; do 
+		if [ -z `which $DEP` ] ; then
+			echo "[ ERROR ] Could not find program '$DEP'."
+			echo " Please install before continuing..."
+			exit 1
+		fi
+	done
+
+	if [ ! -e $SHAREDMEM ] ; then
+		echo "[ ERROR ] $SHAREDMEM NOT Found"
+		exit 1
+	fi
+
+	grep -v Filename /proc/swaps &> /dev/null
+	if [ $? -eq 0 ] ; then
+		echo "[ ERROR ] Not safe to use /dev/shm with swap enabled"
+		exit 1
+	fi
+
+}
+
+persist() {
+	local -r VLT_REQ=$1
+	local EPOCH=`date +"%s"`
+
+        _lookup_vault_path $VLT_REQ
+        VLT_BASE_PATH=$RTN_VAR
+        if [ ! -d $VLT_BASE_PATH ] ; then
+                echo "[ ERROR ] $VLT_REQ Vault NOT Found"
+                exit 1
+        fi
+
+	lock $VLT_REQ "PERSIST"
+	return
+}
+
+
+#---------------------------------------
+# Reads /home/$USER/.secv-map
+# Returns absolute path of vault
+#---------------------------------------
+_lookup_vault_path() {
+	local -r VLT_REQ=$1
+        local VLT_PATH=''
+	local cmd=''
+	RTN_VAR=-1
+
+	if [ ! -e $SECVMAP ] ; then 
+		touch $SECVMAP
+	fi
+	CMD="awk -F\":\" '{if($"2"==\""$VLT_REQ"\"){print $"3"} }' $SECVMAP"
+	VLT_PATH=$(eval $CMD)
+	if [ ! -z "$VLT_PATH" ] && [ -d $VLT_PATH ] ; then
+		RTN_VAR=$VLT_PATH
+	fi
+}
+
+
+#----------------------------------------
+# Generates random list of 20 chars,
+# and from that, returns a random string
+# of size 16
+#----------------------------------------
+generate_cred() {
+
+	local CHARL=(a b c d e f g h i j k l m n o p q r s t u v w x y z)
+	local CHARU=(A B C D E F G H I J K L M N O P Q R S T U V W X Y Z)
+	local NUM=(0 1 2 3 4 5 6 7 8 9)
+	local SPEC=(\~ \` ! @ \# \$ % ^ \& \( \) _ - + = \< \> , . : \; \| )
+
+	local SCORE=()
+	local CHARLST=()
+	local CHARLST_LEN=20
+	local PASSWD_LEN=16
+	local PASSWD=''
+
+	P=0
+	while [ $P -lt $CHARLST_LEN ]
+	do
+		SCORE+=(0)
+		P=$((P+1))
+	done
+
+	ITER=$((CHARLST_LEN/4))
+	for i in `seq $ITER` ; do
+		R=$(($RANDOM%26))
+		X=${CHARL[$R]}
+		CHARLST+=($X)
+
+		R=$(($RANDOM%26))
+		X=${CHARU[$R]}
+		CHARLST+=($X)
+
+		R=$(($RANDOM%10))
+		X=${NUM[$R]}
+		CHARLST+=($X)
+
+		R=$(($RANDOM%22))
+		X=${SPEC[$R]}
+		CHARLST+=($X)
+	done
+
+	P=0
+	while [ $P -lt $PASSWD_LEN ]
+	do
+		R=$(($RANDOM%$CHARLST_LEN))
+		if [ ${SCORE[$R]} -ne 1 ] ; then
+			X=${CHARLST[$R]}
+			PASSWD=$PASSWD$X
+			SCORE[$R]=1
+			P=$((P+1))
+		fi
+	done
+
+	RTN_VAR=$PASSWD
+}
+
+
+#---------------------------------------
+# Writes to secrets file
+# PreReq: Vault must be open or it fails
+#---------------------------------------
+add_entry() {
+	local PWD=`pwd`
+	local -r VLT_REQ=$1
+	local -r CRED_AUTOGEN=$2
+	local -r SECRETS="$SHM/$VLT_REQ/secrets"
+
+	if [ ! -d $SHM/$VLT_REQ ] ; then
+		echo "$VLT_REQ could not be found. Exiting..."
+		echo "Did you Unlock it first?"
+		exit 1
+	fi
+
+	cd $SHM/$VLT_REQ
+	if [ $? -ne 0 ] || [ ! -e ./secrets ] ; then
+		echo "[ERROR] No Permission to 'cd $SHM/$VLT_REQ' "
+		echo "OR" 
+		echo "$SHM/$VLT_REQ/secrets NOT Found."	
+		exit 1
+	fi 
+
+	echo -n "Service:"
+	read SERVICE
+
+	# VERIFY SERVICE/LOGIN DOESN'T ALREADY EXIST
+	CMD="awk -F"\"$DELIMINTER\"" '{if($"1"==\""$SERVICE"\"){print "0"} }' $SECRETS"
+	CHECK=$(eval $CMD)
+	if [ "$CHECK" == "0" ] ; then
+		echo "[ ERROR ] Credential name already exists"
+		exit 1
+	fi
+
+	echo -n "Login:"
+	read LOGIN
+
+	if [ $CRED_AUTOGEN ] ; then
+		generate_cred
+		PASSWD_2=$RTN_VAR
+	else
+		read -rsp "Password: " PASSWD_1
+		echo ''
+
+		read -rsp "(Verify) Password: " PASSWD_2
+		echo ''
+
+		if [ "$PASSWD_1" != "$PASSWD_2" ] ; then
+			echo "Passwords do not match. Exiting..."
+			exit 1
+		fi
+	fi
+
+	ENTRY="$SERVICE$DELIMINTER$LOGIN$DELIMINTER$PASSWD_2"
+
+	# ONE OF 2 PLACES WHERE THE SECRETS FILE IS TOUCHED.
+	printf '%s\n' "$ENTRY" >> ./secrets
+
+	cd $PWD
+}
+
+#---------------------------------------
+# Reads secrets file
+# Awk is used to prevent 
+# other users 
+# from seeing process cmd line via ps. 
+#---------------------------------------
+list_secrets() {
+	local -r VLT_REQ=$1
+	RTN_VAR=-1
+
+        if [ ! -d $SHM/$VLT_REQ ] ; then
+                echo "[ ERROR ] $VLT_REQ is Locked"
+		exit 1
+	fi 
+	
+	SECRETS_FILE=`echo $SHM/$VLT_REQ/secrets | sed -e 's/\/\//\//' `
+	if [ ! -e $SECRETS_FILE ] ; then
+		echo "Could not find $SECRETS_FILE. Exiting..."
+		exit 1
+	fi
+
+	echo "---- $VLT_REQ ----"
+	awk -F ':' '{print NR ": " $1}' $SECRETS_FILE
+
+	for FILE in $(find $SHM/$VLT_REQ/) ; do
+		if [ -f $FILE ] ; then
+			echo "File: $FILE"
+		fi
+	done
+}
+
+#--------------------------------------
+# Real secrets file
+# Like add_entry() awd and printf  
+# are used for same reason. 
+# -------------------------------------
+clip_it() {
+	local PWD=`pwd`
+	local -r VLT_REQ=$1
+	local -r SELECT=$2
+	local VLT_BASE_PATH=''
+	local VLT_PATH=''
+
+	if [ $SELECT -le 0 ] ; then
+		echo "Entry not found."
+		return
+	fi
+
+	_lookup_vault_path $VLT_REQ
+	VLT_BASE_PATH=$RTN_VAR
+	if [ ! -d $VLT_BASE_PATH ] ; then
+		echo "[ERROR] $VLT_REQ Vault NOT Found"
+		return
+	fi
+	VLT_PATH=$VLT_BASE_PATH/$VLT_REQ
+	VLT_PATH=`echo $VLT_PATH | sed -e 's/\/\//\//'`
+
+	if [ ! -d $SHM/$VLT_REQ ] ; then
+		echo "[ ERROR ] $VLT_REQ is Locked"
+		exit 1
+	elif [ ! -d $VLT_PATH ] && [ ! -e $VLT_PATH.tar.gpg ]  ; then
+		echo "[ ERROR ] $VLT_PATH Not Found."
+		return
+	fi
+	cd $SHM/$VLT_REQ
+
+	SECRETS_FILE=`echo $SHM/$VLT_REQ/secrets | sed -e 's/\/\//\//' `
+	NR_LINES=`wc -l $SECRETS_FILE | awk '{print $1}' `
+	if [ $SELECT -gt $NR_LINES ] ; then
+		echo "Entry not found"
+		return
+	fi
+
+	FIELD=2
+	local PRINCIPAL_CMD="awk -F \"$DELIMINTER\" '{ if(NR==$SELECT) print $"$FIELD"}' ./secrets"
+	PRINCIPAL=$(eval $PRINCIPAL_CMD)
+
+	FIELD=3
+	local CREDENTIAL_CMD="awk -F \"$DELIMINTER\" '{ if(NR==$SELECT) print $"$FIELD"}' ./secrets"
+	CREDENTIAL=$(eval $CREDENTIAL_CMD)
+
+	if [ "$CREDENTIAL" == "" ] || [ "$PRINCIPAL" == "" ] ; then
+		echo "[ ERROR ] Principal/Credentials not retrived"
+		return
+	fi
+	
+	echo "Login:$PRINCIPAL"
+	printf '%s\n' "$CREDENTIAL" | xclip
+	cd $PWD
+}
+
+
+#-------------------------------------- 
+# Initialize an empty vault
+# Create secrets file
+# -------------------------------------
+init() {
+	if [ $# -ne 2 ] ; then
+		echo "[ Error ] init() incorrect number of args"
+		exit 1
+	fi
+	
+	local -r NAME=$1
+	local -r VLT_DIR=$2
+	local FULL_PATH=`echo $VLT_DIR/$NAME | sed -e 's/\/\//\//'`
+
+	echo $NAME | grep -q ':'
+	if [ $? -eq 0 ] ; then
+		echo "[ ERROR ] Vault names cannot contain ':' charactor"
+		exit 1
+	fi
+
+	# SETUP .secv-map file
+	if [ ! -e $SECVMAP ] ; then
+		touch $SECVMAP
+	else
+		# this can be replaced with awk statement
+		for VLT in $(cat $SECVMAP | cut -d':' -f2) ; do
+			if [ "$VLT" == "$NAME" ] ; then
+				echo "[ ERROR ] $NAME ALREADY EXISTS"
+				exit 1
+			fi 
+		done
+	fi
+	
+
+	# SETUP WHERE ENCRYPTED VAULT WILL BE STORED
+	if [ ! -d $VLT_DIR ] ; then
+		mkdir -vp $VLT_DIR
+		if [ $? -ne 0 ] ; then
+			echo "[ ERROR ] could not create $VLT_DIR"
+			exit 1
+		fi
+	fi
+
+    #CREATE VAULT IN SHARED MEME
+	if [ -d $SHM/$NAME ] ; then
+		rm -rf $SHM/$NAME
+	fi
+	mkdir -p $SHM/$NAME
+	touch $SHM/$NAME/secrets
+
+	VLT_PATH=$(dirname $FULL_PATH)
+	echo "Vault:$NAME:$VLT_PATH" >> $SECVMAP
+}
+
+
+#--------------------------------------
+# DECRYPT TAR FILE
+# UNTAR FILE
+# CLEANUP
+#--------------------------------------
+unlock() {
+	local PWD=`pwd`
+	local -r VLT_REQ=$1
+	local -r TAR_GPG_VLT=$VLT_REQ.tar.gpg
+	local -r TAR_VLT=$VLT_REQ.tar
+	local VLT_BASE_PATH=''
+	local UNLOCKED_PATH=''
+
+	_lookup_vault_path $VLT_REQ
+	VLT_BASE_PATH=$RTN_VAR
+	if [ ! -d $VLT_BASE_PATH ] ; then 
+		echo "[ ERROR ] $VLT_REQ Vault NOT Found"
+		exit 1 
+	fi
+
+	UNLOCKED_PATH=`echo $SHM/$VLT_REQ | sed -e 's/\/\//\//'`
+	if [ -d $UNLOCKED_PATH ] ; then
+		echo "[ ERROR ] $VLT_REQ is Already UNLOCKED"
+		exit 1
+	fi
+
+	cd $VLT_BASE_PATH
+	if [ $? -ne 0 ] || [ ! -f ./$TAR_GPG_VLT ] || [ ! -r ./$TAR_GPG_VLT ] ; then
+		echo "[ ERROR ] $TAR_GPG_VLT NOT Found and/or Readable.."
+		exit 1
+	fi
+
+
+	mkdir -p $SHM
+	cp ./$TAR_GPG_VLT $SHM
+	cd $SHM
+
+	gpg2 --output ./$TAR_VLT --decrypt ./$TAR_GPG_VLT 
+	if [ $? -eq 0 ] ; then
+
+		if [ ! -f ./$VLT_REQ.tar  ] ; then
+			echo "[ ERROR ] ./$VLT_REQ.tar NOT present after decrypt. Exiting..."
+			exit 1
+		fi
+
+		tar xvf $TAR_VLT
+		if [ $? -eq 0 ] ; then
+			if [ ! -d ./$VLT_REQ ] ; then
+				echo "[ ERROR ] ./$VLT_REQ NOT present after untar."
+				echo "Exiting..." 
+				exit 1
+			fi
+			rm -rf ./$TAR_VLT
+			rm ./$TAR_GPG_VLT
+        else
+			echo "[ ERROR ] Untar Failed"
+			rm -rf $SHM
+			exit 1
+        fi
+	else
+		echo "[ ERROR ] UnLocking Failed"
+		rm -rf $SHM
+		exit 1
+	fi
+	cd $PWD
+}
+
+
+#---------------------------------------
+# TAR DIRECTORY
+# ENCRYPT DIRECTOR 
+# CLEANUP
+#--------------------------------------
+lock() {
+	local PWD='pwd'
+	local -r VLT_REQ=$1
+	local VLT_BASE_PATH=''
+	local PERSISTANCE=0
+
+	if [ "$2" == "PERSIST" ] ; then 
+		PERSISTANCE=1
+	fi
+
+	_lookup_vault_path $VLT_REQ
+	VLT_BASE_PATH=$RTN_VAR
+	if [ ! -d $VLT_BASE_PATH ] ; then
+		echo "[ ERROR ] $VLT_REQ Vault NOT Found"
+		exit 1
+	else
+		mkdir -p $VLT_BASE_PATH
+	fi
+
+	cd $SHM
+	if [ $? -ne 0 ] || [ ! -d ./$VLT_REQ ] || [ ! -r ./$VLT_REQ ] ; then
+		echo "[ ERROR ] $VLT_REQ is not Directory or Not Readable"
+		exit 1
+	fi
+
+	tar cvf ./$VLT_REQ.tar ./$VLT_REQ
+	if [ $? -eq 0 ] ; then
+		
+		gpg2 --output ./$VLT_REQ.tar.gpg --symmetric ./$VLT_REQ.tar
+		if [ $? -eq 0 ] ; then
+
+			# ONE LAST VERIFICATION BEFORE WE START SHREDING
+			if [ ! -f ./$VLT_REQ.tar.gpg  ] ; then
+				echo "[ ERROR ] ./$VLT_REQ.tar.gpg NOT FOUND. Exiting..."	
+				exit 1
+			fi 
+
+			if [ $PERSISTANCE -eq 0 ] ; then 
+				for FILE in $(find ./$VLT_REQ) ; do
+					if [ -f $FILE ] ; then 
+						rm -rf ./$VLT_REQ/$FILE
+					fi
+				done
+				rm -rf ./$VLT_REQ
+			fi
+			rm ./$VLT_REQ.tar
+		else
+			echo "Encrypt Fail"
+			exit 1
+		fi
+
+	else
+		echo "Tar Fail"
+		exit 1
+	fi
+
+	cp ./$VLT_REQ.tar.gpg $VLT_BASE_PATH/
+	if [ ! $? -eq 0 ] ; then 
+		echo "CP FAILED"
+		exit 1
+	fi
+	rm $SHM/$VLT_REQ.tar.gpg
+	cd $PWD
+}
+
+list() {
+	local VAULT=''
+
+	if [ ! -r $SECVMAP ] ; then
+		touch $SECVMAP
+	fi
+
+	echo "---- Available Vaults ----"
+	for LINE in $(cat $SECVMAP) ; do
+		VAULT=`echo $LINE | cut -d':' -f2`
+
+		if [ -e $SHM/$VAULT ] ; then
+			echo -ne "\e[92m[OPEN]\e[0m"
+			echo "   $VAULT"
+		else
+			echo -ne "\e[31m[LOCKED]\e[0m"
+			echo " $VAULT"
+		fi
+	done	
+}
+
+delete_secret() {
+	local PWD=`pwd`
+	local -r VLT_REQ=$1
+	local -r SELECT=$2
+	local VLT_BASE_PATH=''
+	local CHOICE=''
+
+	if [ $SELECT -lt 0 ] || [ $SELECT -eq 0 ]; then
+		echo "Entry not found."
+		exit 1
+	fi
+
+	_lookup_vault_path $VLT_REQ
+	VLT_BASE_PATH=$RTN_VAR
+	if [ ! -d $VLT_BASE_PATH ] ; then
+		echo "[ ERROR ] $VLT_REQ Vault NOT Found"
+		exit 1
+	fi
+
+	if [ ! -e $SHM/$VLT_REQ ] ; then
+		echo "not unloacked and shit"
+		exit 1
+	fi
+	cd $SHM/$VLT_REQ
+
+	SECRETS_FILE=`echo ./secrets | sed -e 's/\/\//\//' `
+
+	NR_LINES=`wc -l $SECRETS_FILE | awk '{print $1}' `
+	# OR less than?
+	if [ $SELECT -gt $NR_LINES ] ; then
+		echo "Entry not found"
+		exit 1
+	fi
+
+	echo "You have requested to DELETE entry: $SELECT"
+	read -rp "Are you really F'ing sure you want to Delete this Entry? (Y/N) :" CHOICE
+	if [ "$CHOICE" == "Y" ] ; then
+		CMD="sed -i '"$SELECT"d' $SECRETS_FILE"
+		$(eval $CMD)		
+		if [ $? -eq 0 ] ; then
+			echo "Entry: $SELECT Successfully Removed"
+		else
+			echo "[ ERROR ]: Removal opperation failed"
+			exit 1
+		fi
+	else
+		echo "Detletion Aborted."
+	fi
+
+	cd $PWD
+}
+
+
+usage() {
+cat << EOF
+   Usage: $0 <Required> [ Optional ]
+   Options are:
+     -i <Vault> [ -p vlt-path ] : Create/Initialize emtpy Vault at a
+                                  specified Path. Path Defaults to
+                                  ~/.secret if not specified.
+     -L <Vault>  : Lock Vault.
+     -U <Vault>  : Unlock Vault.
+     -l <Vault>  : List Vaults.
+     -s <Vault>  : List Entry names of secrets.
+                   This option requires vault to be Unlocked.
+     -A <Vault>  : Add Secrets to Vault - Password is Auto-Generated.
+                   This option requires vault to be Unlocked.
+                   Vault must be Re-Locked (or use -P) for changes to persist.
+     -a <Vault>  : Add secrets to Vault - Password supplied by user.
+                   This option requires vault to be Unlocked.
+                   Vault must be Re-Locked (or use -P) for changes to persist.
+     -D <Vault>  : Delete a secret from a vault.
+     -q <Vault>  : Quick retrieval of secret.
+     -P <vault>  : Encrypts/saves the state of an Open Vault.
+                   Vault remains open.
+EOF
+}
+
+
+################
+##### MAIN #####
+################
+
+dep_check
+ARGS_NR=`echo $#`
+
+# read the options
+TEMP=`getopt -o i:p:P:U:L:c:a:A:s:D:q:l::h::v:: -n 'secv' -- "$@"`
+eval set -- "$TEMP"
+if [ $? -ne 0 ] ; then 
+	usage
+	exit 1 
+fi
+
+
+# extract options and their arguments into variables.
+while true ; do
+    case "$1" in
+	-h|--help)
+		usage
+		exit 0
+		;;
+
+	-v|--version)
+		echo "Verstion: $VERSION"
+		exit 0
+		;;
+
+	-P|--persist)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "4 [ ERROR ] Not sure what you are attempting to do"
+			usage
+			exit 1
+		fi
+		ARG=$2; shift 2
+		persist $ARG
+		echo -n "Vault Written: "
+		date
+		exit 0
+		;;
+
+	-i|--init)
+		if [ $# -ne 3 ] && [ $# -ne 5 ] ; then
+			echo "[ ERROR ] Invalid Number of args"
+			break
+		fi
+
+		ARG_INIT_VLT=$2 ; shift 2 
+		if [ "$1" == "-p" ] ; then
+			ARG_PATH=$2
+		else
+			ARG_PATH="/home/$USER/.secret"
+		fi
+
+		init $ARG_INIT_VLT $ARG_PATH
+		lock $ARG_INIT_VLT
+		exit 0
+		;;
+
+	-U|--Unlock)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "3 [ ERROR ] Not sure what you are attempting to do"
+			usage
+			exit 1
+		fi
+		ARG_UNLOCK_DB=$2; shift 2
+		unlock $ARG_UNLOCK_DB
+		exit 0
+		;;
+
+	-L|--LOCK)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "4 [ ERROR ] Not sure what you are attempting to do"
+			usage
+			exit 1
+		fi
+		ARG_LOCK_DB=$2; shift 2
+		lock $ARG_LOCK_DB
+		exit 0
+		;;
+
+	-A|--gen-add-secret)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "5 [ ERROR ] Not sure what you are attempting to do"
+			usage
+			exit 1
+		fi
+		DB_NAME=$2
+		add_entry $DB_NAME 'TRUE'
+		exit 0
+		;;
+
+	-a|--add-secret)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "5 [ ERROR ] Not sure what you are attempting to do"
+			usage
+			exit 1
+		fi
+		DB_NAME=$2	
+		add_entry $DB_NAME
+		exit 0
+		;;
+
+	-l|--list)
+		list
+		exit 0
+		;;
+
+	-s|--list-secrets)
+		if [ $ARGS_NR -ne 2 ] ; then
+			echo "5 [ ERROR ] Missing name of DB"
+			usage
+			exit 1
+		fi
+		DB_NAME=$2
+		list_secrets $DB_NAME
+		exit 0
+		;;
+
+	-D|--Delete-secret)
+		VLT=$2
+		list_secrets $VLT
+		declare -i CRED_NUM
+
+		echo -n "Select entry to be DELETED: "
+		read CRED_NUM
+		if [ ! $CRED_NUM -eq 0 ] ; then
+			delete_secret $VLT $CRED_NUM
+		else
+			echo "[ ERROR ] Invalid Input"
+			exit 1
+		fi
+
+		exit 0
+		;;
+
+	-q|quick-retrival)
+		VLT=$2 
+		unlock $VLT
+		declare -i CRED_NUM
+
+		_lookup_vault_path $VLT
+		BASE_PATH=$RTN_VAR
+		if [ ! -d $BASE_PATH ] ; then
+			echo "[ ERROR ]  $BASE_PATH"
+			exit 1
+		fi
+		cd $BASE_PATH
+
+		list_secrets $VLT
+
+		echo -n "Select: "
+		read CRED_NUM
+		if [ ! $CRED_NUM -eq 0 ] ; then
+			clip_it $VLT $CRED_NUM
+		else
+			echo "[ ERROR ] Invalid Input"
+		fi
+
+		cd $SHM
+		rm -rf ./$VLT
+
+		exit 0
+		;;
+
+        --) shift ; break ;;
+        *) usage ; exit 1 ;;
+    esac
+done
+
+usage
+exit 1
+

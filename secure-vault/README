@@ -1,0 +1,26 @@
+
+A Few Breif Notes...
+
+* Secure-Vault (secv) is a simple password manager for Linux,
+written in BASH Shell. That's right, BASH. :) 
+
+* For instruction on how to use secv, just type ./secv
+and the help menu will magically appear before your eyes!
+
+* This is Free Software. Please see License. 
+
+* secv uses /home/$USER/secv-map as a dictionary
+to associate the name of your vaults with the location
+of the encrypted vault on your system's disk. 
+
+* /dev/shm/$USER/ (tmpfs) is used to temporarily 
+store the decrypted vault(s). Thus, Un-Encrypted 
+Secrets are NEVER written to disk. 
+
+* Contributions/fixes/bug reports are Welcome.
+
+* To prevent gpg2 from using your Desktop Manager dialog 
+box for passphrase, you can force a curses menu by:
+Install pinentry-curses
+echo "pinentry-program /usr/bin/pinentry-curses" >> ~/.gnupg/pinentry-program
+
