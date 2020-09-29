@@ -1,0 +1,78 @@
+#!/bin/bash
+# Trivial script for accessing and organizing notes.
+# Minimizes time looking for your notes, basically by standardizing
+# where they are stored. 
+#------------------------------------------------------------------------------
+#    Copyright (C) 2018 Tree Davies tdavies@darkphysics.net
+#
+#    This program is free software; you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation; either version 2 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program; if not, write to the Free Software
+#    Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+#------------------------------------------------------------------------------
+
+BASE_DIR="/home/$USER/.MY-NOTES"
+[ -e $BASE_DIR ] || mkdir $BASE_DIR
+
+if [ -z `which vim` ] ; then
+	echo "[ ERROR ] Could not find vim."
+	echo " Please install before continuing..."
+	exit 1
+fi
+VIM=`which vim`
+
+# LIST NOTES AND NOTE TOPICS
+if [ "$1" == "-l" ] ; then
+	if [ $# -eq 1 ] ; then
+		NOTES=`ls -rt $BASE_DIR`
+		for note in $NOTES ; do
+			if [ -d $BASE_DIR/$note ] ; then
+				echo "Topic: $note"
+			fi
+		done
+
+		for note in $NOTES ; do
+			if [ ! -d $BASE_DIR/$note ] ; then
+				echo "generic: $note"
+			fi
+		done
+	elif [ $# -eq 2 ] ; then
+		NOTES=`ls -rt $BASE_DIR/$2`
+		for note in $NOTES ; do
+			echo "$2: $note"
+		done
+	fi
+	exit 0
+fi
+
+# OPEN NOTES
+if [ ! "$1" == "-l" ] ; then
+	if [ $# -eq 1 ] ; then
+		$VIM $BASE_DIR/$1
+	fi
+
+	if [ $# -eq 2  ] ; then
+		mkdir -p /$BASE_DIR/$1
+		$VIM $BASE_DIR/$1/$2
+	fi
+else
+cat << EOF
+   Usage: $0 <Required> [Optional]
+   Usave: $0 <file-name>
+   Usage: $0 [topic-name] <file-name>
+   Options are:
+     -l [topic-name] : List notes in base directory, or by topic 
+EOF
+fi
+
+exit 0
+
