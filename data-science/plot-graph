@@ -1,0 +1,12 @@
+#!/usr/bin/gnuplot
+
+set terminal jpeg
+set xtics 0, 10
+set xlabel "Percentile"
+set ylabel "UNITS"
+set grid xtics
+set grid ytics
+set yrange [0:X]
+set output 'GRAPH.jpeg'
+plot 'FILE-ONE' with lines, 'FILE-TWO' with lines
+
